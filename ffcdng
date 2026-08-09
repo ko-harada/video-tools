@@ -1,0 +1,367 @@
+#!/bin/bash
+
+function usage() {
+    cat <<EOS
+$0 [fghsr] dirs, ...
+-e, --encode          encode jpgs to mp4
+-f, --force           force write output if already exists
+-g, --gpu             use GPU (default NO)
+-s, --stabilize       enable video stabilization (default NO)
+-d, --stabdetect      analyze video stabilization (vidstabdetect)
+-t, --stabtransform   video stabilization (vidstabtransform)
+-n, --normalize       normalize audio
+-z, --zoom            stabtransform zoom (default 5; max 105%)
+-r, --rate            frame rate (default auto)
+-k, --skip            skip if exists
+EOS
+}
+
+
+function jpg2mp4() {
+    WAV_INPUT=$1
+    VIDEO_INPUT=$2
+    FRAMERATE=$3
+    OUTPUT=$4
+
+    if [[ -e $OUTPUT ]]; then
+        echo "$OUTPUT already exists. skipping." 1>&2
+              return 0
+    fi
+    local json=ffmpeg/${DIR}.json
+    nice -n 19 ionice -c2 -n7 \
+    ffmpeg -loglevel 16 \
+        -i $WAV_INPUT -r $FRAMERATE -i $VIDEO_INPUT \
+        -vf "scale=in_range=full:out_range=tv,format=yuv422p10le" \
+        -af "
+            acompressor=threshold=-24dB:ratio=2.5:attack=10:release=100,
+            loudnorm=
+                I=-16:
+                TP=-1.5:
+                LRA=11:
+                measured_I=$(jq -r '.input_i' $json):
+                measured_LRA=$(jq -r '.input_lra' $json):
+                measured_thresh=$(jq -r '.input_thresh' $json):
+                offset=$(jq -r '.target_offset' $json):
+                linear=true
+        " \
+        -c:a aac \
+        -color_primaries bt709 \
+        -color_trc bt709 \
+        -colorspace bt709 \
+        -color_range tv \
+        -c:v libx265 -pix_fmt yuv422p10le \
+        -crf 18 -preset slow \
+        -x265-params profile=main422-10 \
+        -r $FRAMERATE $OUTPUT
+}
+
+
+function jpg2prores() {
+    WAV_INPUT=$1
+    VIDEO_INPUT=$2
+    FRAMERATE=$3
+    OUTPUT=$4
+
+    if [[ -e $OUTPUT ]]; then
+        echo "$OUTPUT already exists. skipping." 1>&2
+              return 0
+    fi
+    nice -n 19 ionice -c2 -n7 \
+    ffmpeg -loglevel 16 \
+        -i $WAV_INPUT -r $FRAMERATE -i $VIDEO_INPUT \
+        -vf "format=yuv422p10le" \
+        -c:v prores_ks -profile:v 3 -c:a aac \
+        -color_range pc \
+        -r $FRAMERATE $OUTPUT
+}
+
+
+function vidstabdetect() {
+    local INPUT_MP4=$1
+
+    if [[ -e ffmpeg/${INPUT_MP4%.*}.trf ]]; then
+        echo ffmpeg/"${INPUT_MP4%.*}.trf already exists. skipping." 1>&2
+    else
+        nice -n 19 ionice -c2 -n7 \
+        ffmpeg -loglevel 16 \
+        -i $INPUT_MP4 \
+        -vf "vidstabdetect=result=ffmpeg/${INPUT_MP4%.*}.trf:tripod=0" \
+        -an -f null -
+    fi
+}
+
+
+function vidstabtransform() {
+    local INPUT_MP4=$1
+    local OUTPUT_MP4=$2
+    local ZOOM=${3:-5}
+    if [[ -e $OUTPUT_MP4 ]]; then
+        echo "${OUTPUT_MP4} already exists. skipping." 1>&2
+              return 0
+    else
+        nice -n 19 ionice -c2 -n7 \
+        ffmpeg -loglevel 16 \
+        -i $INPUT_MP4 \
+        -vf "
+            vidstabtransform=input=ffmpeg/${INPUT_MP4%.*}.trf:tripod=0:zoom=${ZOOM}:optzoom=2,
+            unsharp=7:7:0.4:5:5:0.2,
+            format=yuv422p10le
+            " \
+        -c:a copy \
+        -color_primaries bt709 \
+        -color_trc bt709 \
+        -colorspace bt709 \
+        -color_range tv \
+        -c:v libx265 -pix_fmt yuv422p10le \
+        -crf 18 -preset slow \
+        -x265-params profile=main422-10 \
+        $OUTPUT_MP4
+        # デフォルトの推奨値だが強すぎる
+        #    unsharp=5:5:0.8:3:3:0.4,
+        # -c:v libx265 -crf 18 -c:a copy \
+        # -c:v prores_ks -profile:v 3 -c:a copy $OUTPUT_MP4
+    fi
+}
+
+
+function check_dir() {
+    DIR=$1
+    if ! wav=$(ls $DIR/*.WAV | grep -e "^$DIR/A..._..._........\.WAV$"); then
+        echo "$DIR: WARNING: No WAV file found" >&2
+        return 1
+    fi
+
+    local last_dng=$(ls $DIR/*.DNG | tail -n 1)
+    # if ! (ls $DIR/*.jpg | grep -e "^$DIR/A..._..._........_......\.jpg$" > /dev/null); then
+    # if ! [[ -e ${last_dng%.DNG}.jpg ]]; then
+    if ! [[ -e ${last_dng%.DNG}.jxl ]]; then
+        echo "$DIR: WARNING: No JPEG XL file found" >&2
+        return 1
+    fi
+    echo -n $wav
+}
+
+
+function analyze_audio() {
+    local DIR=$1
+    local WAV=$2
+    JSON=ffmpeg/${DIR}.json
+    ## 音声のコンプレッサーとノーマライズの1-pass目
+    # 
+    ## 風切り音対策する場合
+    #    highpass=f=100,
+    ffmpeg -hide_banner -i $WAV -af "
+        acompressor=threshold=-24dB:ratio=2.5:attack=10:release=100,
+        loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json
+    " -f null - 2>&1 | sed -n '/^{/,/}$/p' | tee $JSON
+}
+
+
+function histfile() {
+    local ext=${1##*.}
+    local file=${1%%.*}
+    local history=${2:-2}
+    local i
+    if [ -e ${file}.${ext} ]; then
+        for (( i = $history; i > 0; i-- )); do
+            if [[ -e ${file}.$i.${ext} ]]; then
+              mv ${file}.$i.${ext} ${file}.$((i+1)).{ext}
+            fi
+        done
+        mv ${file}.${ext} ${file}.1.${ext}
+    fi
+    echo "${file}.${ext}"
+}
+
+
+detect_cinedng_fps_exif() {
+    local dir="$1"
+  
+    if [ ! -d "$dir" ]; then
+        echo "ERROR: directory not found" >&2
+        return 1
+    fi
+  
+    # 最初のDNGを取得
+    local dng
+    dng=$(find "$dir" -maxdepth 1 -type f -iname "*.DNG" | sort | head -n 1)
+  
+    if [ -z "$dng" ]; then
+        echo "ERROR: no DNG files" >&2
+        return 1
+    fi
+  
+    # FrameRate または CaptureRate を取得
+    local rate
+    rate=$(exiftool -s -s -s -FrameRate -CaptureRate "$dng" 2>/dev/null | head -n 1)
+  
+    if [ -z "$rate" ]; then
+        echo "ERROR: FrameRate not found" >&2
+        return 1
+    fi
+  
+    # 小数を正規化
+    case "$rate" in
+        23.976*|23.98*)
+            echo "24000/1001"
+            ;;
+        24*)
+            echo "24"
+            ;;
+        29.97*|29.970*)
+            echo "30000/1001"
+            ;;
+        59.94*|59.940*)
+            echo "60000/1001"
+            ;;
+        60*)
+            echo "60"
+            ;;
+        100*)
+            echo "100"
+            ;;
+        120*)
+            echo "120"
+            ;;
+        *)
+            # 未知の値はそのまま返す
+            echo "$rate"
+            ;;
+    esac
+}
+
+
+
+DIRS=()
+HISTORY=2
+FRAMERATE=auto
+ENCODE=NO
+FORCE=NO
+STABDETECT=NO
+STABTRANS=NO
+NORMAUDIO=NO
+ZOOM=5
+SKIP=NO
+GPU=NO
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -e|--encode)
+            ENCODE="YES"
+            shift
+            ;;
+        -f|--force)
+            FORCE="YES"
+            shift
+            ;;
+        -g|--gpu)
+            GPU="YES"
+            shift
+            ;;
+        -s|--stabilize)
+            STABDETECT="YES"
+            STABTRANS="YES"
+            shift
+            ;;
+        -d|--stabdetect)
+            STABDETECT="YES"
+            shift
+            ;;
+        -t|--stabtransform)
+            STABTRANS="YES"
+            shift
+            ;;
+        -n|--normalize)
+            NORMAUDIO="YES"
+            shift
+            ;;
+        -z|--zoom)
+            ZOOM="$2"
+            shift
+            shift
+            ;;
+        -r|--rate)
+            FRAMERATE="$2"
+            shift
+            shift
+            ;;
+        -k|--skip)
+            SKIP="YES"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        -v|--verbose)
+            set -x
+            shift
+            ;;
+        -*|--*)
+            echo "Unknown option $1"
+            exit 1
+            ;;
+        *)
+            DIRS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+set -- "${DIRS[@]}"
+
+# source $(dirname $0)/ffmpeg.sh
+
+mkdir -p ffmpeg
+
+if [[ $# -eq 0 ]]; then
+    echo "No directory specified." >&2
+    DIRS=$(ls | grep -e "^A..._...$")
+else
+    DIRS=${DIRS[@]}
+fi
+echo "Directories: $DIRS"
+
+if [[ "$ENCODE" == "YES" ]]; then
+    rate=$FRAMERATE
+    for DIR in $DIRS
+    do
+        WAV=$(check_dir $DIR) || continue
+        analyze_audio $DIR $WAV || continue
+        [[ "$SKIP" == "YES" && -e ${DIR}.mp4 ]] && continue
+        [[ "$FRAMERATE" == "auto" ]] && rate=$(detect_cinedng_fps_exif ${DIR})
+        echo -e "\nEncoding: ${DIR}.mp4 at $rate fps" >&2
+        jpg2mp4 $WAV ${WAV%.*}_%06d.jxl $rate $(histfile ${DIR}.mp4 ${HISTORY})
+        # echo "Encoding: ${DIR}.mov" >&2
+        # jpg2prores $WAV ${WAV%.*}_%06d.jpg $FRAMERATE $(histfile ${DIR}.mov ${HISTORY})
+        # echo "Encoding: ${DIR}.mp4" >&2
+        # jpg2mp4 $WAV ${WAV%.*}_%06d.jpg $FRAMERATE $(histfile ${DIR}.mp4 ${HISTORY})
+    done
+fi
+
+
+for DIR in $DIRS
+do
+    if [[ ! -e ${DIR}.mp4 ]]; then
+        echo "$DIR: WARNING: No ${DIR}.mp4 file found" >&2
+        continue
+    fi
+    [[ "$SKIP" == "YES" && -e stab_${DIR}.mp4 ]] && continue
+
+    if [[ "$STABDETECT" == "YES" ]]; then
+        echo -e "\nStabilization detection: ${DIR}.mp4" >&2
+        vidstabdetect ${DIR}.mp4
+    fi
+
+    if [[ "$NORMAUDIO" == "YES" ]]; then
+        echo -e "\nAudio normalization pass-1: ${DIR}.mp4" >&2
+        vidstabdetect ${DIR}.mp4
+    fi
+
+    if [[ "$STABTRANS" == "YES" ]]; then
+        # echo "Stabilization transform: stab_${DIR}.mov" >&2
+        # vidstabtransform ${DIR}.mov $(histfile stab_${DIR}.mov ${HISTORY}) ${ZOOM}
+        echo -e "\nStabilization transform: stab_${DIR}.mp4" >&2
+        vidstabtransform ${DIR}.mp4 $(histfile stab_${DIR}.mp4 ${HISTORY}) ${ZOOM}
+    fi
+done
