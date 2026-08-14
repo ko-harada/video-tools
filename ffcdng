@@ -44,7 +44,7 @@ function jpg2mp4() {
                 offset=$(jq -r '.target_offset' $json):
                 linear=true
         " \
-        -c:a aac \
+        -c:a aac -b:a 256k \
         -color_primaries bt709 \
         -color_trc bt709 \
         -colorspace bt709 \

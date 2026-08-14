@@ -1,6 +1,6 @@
 #!/bin/bash
 
-mkdir -p exr
+mkdir -p ffmpeg
 
 HALDCLUTSRC=13
 SS="00:00:04"
@@ -74,8 +74,27 @@ echo "Movies: $MOVS"
 
 for mov in $MOVS
 do
-  if [ -e exr/$mov.exr ]; then
-    echo "Skipping. exr/$mov.exr already exists."
+  ################################################################################ 
+  # Analyze Audio 1-pass
+  ################################################################################ 
+  if [ -e ffmpeg/$mov.json ]; then
+    echo "Skipping. ffmpeg/$mov.json already exists."
+    continue
+  fi
+
+  nice -n 19 ionice -c2 -n7 \
+  ffmpeg -hide_banner -i $mov -map 0:a:0 -vn -af "
+    acompressor=threshold=-24dB:ratio=2.5:attack=10:release=100,
+    loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json
+  " -f null - 2>&1 | sed -n '/^{/,/}$/p' \
+  | tee ffmpeg/$mov.json
+
+
+  ################################################################################ 
+  # Generate EXR with HaldcLUT
+  ################################################################################ 
+  if [ -e ffmpeg/$mov.exr ]; then
+    echo "Skipping. ffmpeg/$mov.exr already exists."
     continue
   fi
 
@@ -120,7 +139,7 @@ do
         [1]scale=-1:${scale[$HALDCLUTSRC]}[b];[0][b]hstack
     " \
     -pix_fmt gbrpf32le \
-    exr/$mov.exr
+    ffmpeg/$mov.exr
 
   rm -f _frame.exr _hald.exr
 

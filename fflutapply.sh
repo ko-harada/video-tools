@@ -134,7 +134,7 @@ do
     continue
   fi
 
-  echo "$process ${mov}."
+  echo "$processing video stream of ${mov}."
   nice -n 19 ionice -c2 -n7 \
   ffmpeg \
     $SSOPT -i $mov -i $png \
@@ -147,18 +147,74 @@ do
         [vid];
       [vid][1:v]
         haldclut,
-        zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=full,
+        zscale=
+          primaries=bt709:
+          transfer=bt709:
+          matrix=bt709:
+          in_range=full:
+          out_range=tv,
         format=yuv422p10le
     " \
     -color_primaries bt709 \
     -color_trc bt709 \
     -colorspace bt709 \
-    -color_range full \
+    -color_range tv \
     -c:v libx265 -pix_fmt yuv422p10le \
     -crf $CRF -preset slow \
     -x265-params profile=main422-10 \
-    -c:a copy \
+    -an \
+    _video.mp4
+
+  json=ffmpeg/${mov}.json
+  echo "$processing audio stream of ${mov} with $json."
+  nice -n 19 ionice -c2 -n7 \
+  ffmpeg \
+    -i $mov \
+    -vn \
+    -af "
+        acompressor=threshold=-24dB:ratio=2.5:attack=10:release=100,
+        loudnorm=
+            I=-16:
+            TP=-1.5:
+            LRA=11:
+            measured_I=$(jq -r '.input_i' $json):
+            measured_LRA=$(jq -r '.input_lra' $json):
+            measured_thresh=$(jq -r '.input_thresh' $json):
+            offset=$(jq -r '.target_offset' $json):
+            linear=true
+    " \
+    -c:a aac -b:a 256k \
+    _audio.m4a
+
+  echo "$processing mux video/audio stream of ${mov}."
+  nice -n 19 ionice -c2 -n7 \
+  ffmpeg \
+    -i _video.mp4 -i _audio.m4a \
+    -c copy \
     $(histfile $OUTPUT $HISTORY)
+
+  rm -f _video.mp4 _audio.m4a
+
+  # echo "$processing video stream of ${mov}."
+  # nice -n 19 ionice -c2 -n7 \
+  # ffmpeg \
+  #   $SSOPT -i $mov -i $png \
+  #   -vn \
+  #   -af "
+  #       acompressor=threshold=-24dB:ratio=2.5:attack=10:release=100,
+  #       loudnorm=
+  #           I=-16:
+  #           TP=-1.5:
+  #           LRA=11:
+  #           measured_I=$(jq -r '.input_i' $json):
+  #           measured_LRA=$(jq -r '.input_lra' $json):
+  #           measured_thresh=$(jq -r '.input_thresh' $json):
+  #           offset=$(jq -r '.target_offset' $json):
+  #           linear=true
+  #   " \
+  #   -c:a aac -b:a 256k \
+  #   $(histfile $OUTPUT $HISTORY)
+
 
     #    zscale=primaries=bt709:rangein=full:range=full
 
@@ -305,10 +361,3 @@ do
 
 done
 
-#ffmpeg -i $1 \
-#  -i png/exported_$1.png \
-#  -filter_complex haldclut \
-#  #-pix_fmt yuv420p \
-#  -c:v libx264 -preset slow -crf 18 \
-#  -c:a copy \
-#  corrected/$1.mp4
