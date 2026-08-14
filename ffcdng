@@ -239,7 +239,7 @@ ENCODE=NO
 FORCE=NO
 STABDETECT=NO
 STABTRANS=NO
-NORMAUDIO=NO
+NORMAUDIO=YES
 ZOOM=5
 SKIP=NO
 GPU=NO
@@ -322,24 +322,33 @@ else
 fi
 echo "Directories: $DIRS"
 
+################################################################################
+# Pass-1: 
+#   - Encode JPEG XL to H.265
+#   - Audio analyze (pass-1)
+################################################################################
 if [[ "$ENCODE" == "YES" ]]; then
     rate=$FRAMERATE
     for DIR in $DIRS
     do
         WAV=$(check_dir $DIR) || continue
-        analyze_audio $DIR $WAV || continue
+        if [[ "$NORMAUDIO" == "YES" && ! -e ffmpeg/$DIR.json ]]; then
+            analyze_audio $DIR $WAV || continue
+        fi
         [[ "$SKIP" == "YES" && -e ${DIR}.mp4 ]] && continue
         [[ "$FRAMERATE" == "auto" ]] && rate=$(detect_cinedng_fps_exif ${DIR})
         echo -e "\nEncoding: ${DIR}.mp4 at $rate fps" >&2
         jpg2mp4 $WAV ${WAV%.*}_%06d.jxl $rate $(histfile ${DIR}.mp4 ${HISTORY})
-        # echo "Encoding: ${DIR}.mov" >&2
-        # jpg2prores $WAV ${WAV%.*}_%06d.jpg $FRAMERATE $(histfile ${DIR}.mov ${HISTORY})
-        # echo "Encoding: ${DIR}.mp4" >&2
-        # jpg2mp4 $WAV ${WAV%.*}_%06d.jpg $FRAMERATE $(histfile ${DIR}.mp4 ${HISTORY})
     done
 fi
 
 
+################################################################################
+# Pass-2: 
+#   - Stabilization detection/stabilize
+#   - (If analysis result not exists) Audio analyze (pass-1)
+#   - Audio normalization (pass-2)
+################################################################################
 for DIR in $DIRS
 do
     if [[ ! -e ${DIR}.mp4 ]]; then
@@ -353,9 +362,9 @@ do
         vidstabdetect ${DIR}.mp4
     fi
 
-    if [[ "$NORMAUDIO" == "YES" ]]; then
+    if [[ "$NORMAUDIO" == "YES" && ! -e ffmpeg/$DIR.json ]]; then
         echo -e "\nAudio normalization pass-1: ${DIR}.mp4" >&2
-        vidstabdetect ${DIR}.mp4
+        analyze_audio $DIR $WAV
     fi
 
     if [[ "$STABTRANS" == "YES" ]]; then
