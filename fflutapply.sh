@@ -87,29 +87,9 @@ mkdir -p corrected
 
 for mov in $MOVS
 do
-  # png="exported/${mov}.png"
-  png="exported/${mov}.exr"
-  # if [ -e corrected/${mov}.mp4 ]; then
-  #   if [ $png -nt corrected/${mov}.mp4 ]; then
-  #     process="Updating"
-  #     for (( i = $HISTORY; i > 0; i-- )); do
-  #       if [[ -e corrected/${mov}.$i.mp4 ]]; then
-  #         mv corrected/${mov}.$i.mp4 corrected/${mov}.$((i+1)).mp4
-  #       fi
-  #     done
-  #     mv corrected/${mov}.mp4 corrected/${mov}.1.mp4
-  #   else
-  #     echo "Skipped: corrected/${mov}.mp4 already exists."
-  #     continue
-  #   fi
-  # else
-  #   if [ -e ${mov} ]; then
-  #     process="Generating"
-  #   else
-  #     echo "Skipped: ${mov} does not found."
-  #     continue
-  #   fi
-  # fi
+  png="exported/${mov}.png"
+  exr="exported/${mov}.exr"
+  cube="exported/${mov}.cube"
 
   ext=${mov##*.}
   file=${mov%%.*}
@@ -134,19 +114,35 @@ do
     continue
   fi
 
-  echo "$processing video stream of ${mov}."
-  nice -n 19 ionice -c2 -n7 \
-  ffmpeg \
-    $SSOPT -i $mov -i $png \
-    -filter_complex "
-      [0:v]
+  if [[ -e $png ]]; then
+    if [[ ! -e $cube || $png -nt $cube ]]; then
+      echo "converting $png to $cube."
+      lut_utility convert -t 65 -i $png -o $cube
+    fi
+    ######################################################################
+    # PNG: HaldcLUT
+    # -> cube (w lut_utility)
+    # -> apply (w libplacebo GPU)
+    # -> h.265 (w nvenc GPU)
+    ######################################################################
+    echo "$processing video stream of ${mov}."
+    nice -n 19 ionice -c2 -n7 \
+    ffmpeg \
+      -init_hw_device vulkan=vk:0 \
+      -filter_hw_device vk \
+      $SSOPT -i $mov \
+      -filter_complex "
         zscale=
           primaries=bt709:
           transfer=linear,
-        format=gbrpf32le
-        [vid];
-      [vid][1:v]
-        haldclut,
+        format=gbrpf32le,
+        hwupload,
+        libplacebo=
+          lut=$cube:
+          lut_type=normalized:
+          format=gbrpf32le,
+        hwdownload,
+        format=gbrpf32le,
         zscale=
           primaries=bt709:
           transfer=bt709:
@@ -154,16 +150,50 @@ do
           in_range=full:
           out_range=tv,
         format=yuv422p10le
-    " \
-    -color_primaries bt709 \
-    -color_trc bt709 \
-    -colorspace bt709 \
-    -color_range tv \
-    -c:v libx265 -pix_fmt yuv422p10le \
-    -crf $CRF -preset slow \
-    -x265-params profile=main422-10 \
-    -an \
-    _video.mp4
+      " \
+      -color_primaries bt709 \
+      -color_trc bt709 \
+      -colorspace bt709 \
+      -color_range tv \
+      -c:v hevc_nvenc -pix_fmt p010le \
+      -preset p5 -rc constqp -qp 18 \
+      -an \
+      _video.mp4
+  else
+    ######################################################################
+    # EXR: HaldcLUT
+    ######################################################################
+    echo "$processing video stream of ${mov}."
+    nice -n 19 ionice -c2 -n7 \
+    ffmpeg \
+      $SSOPT -i $mov -i $exr \
+      -filter_complex "
+        [0:v]
+          zscale=
+            primaries=bt709:
+            transfer=linear,
+          format=gbrpf32le
+          [vid];
+        [vid][1:v]
+          haldclut,
+          zscale=
+            primaries=bt709:
+            transfer=bt709:
+            matrix=bt709:
+            in_range=full:
+            out_range=tv,
+          format=yuv422p10le
+      " \
+      -color_primaries bt709 \
+      -color_trc bt709 \
+      -colorspace bt709 \
+      -color_range tv \
+      -c:v libx265 -pix_fmt yuv422p10le \
+      -crf $CRF -preset slow \
+      -x265-params profile=main422-10 \
+      -an \
+      _video.mp4
+  fi
 
   json=ffmpeg/${mov}.json
   echo "$processing audio stream of ${mov} with $json."
