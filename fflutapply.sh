@@ -95,8 +95,8 @@ do
   file=${mov%%.*}
   OUTPUT="corrected/${file}.mp4"
 
-  if [[ ! -e $png ]]; then
-      echo "Skipping. ${png} not found." >&2
+  if [[ ! -e $png && ! -e $exr ]]; then
+      echo "Skipping. no ${png} nor ${exr} found." >&2
       continue
   fi
   if [[ "$IS_PNG" == "YES" ]]; then
@@ -118,6 +118,7 @@ do
     if [[ ! -e $cube || $png -nt $cube ]]; then
       echo "converting $png to $cube."
       lut_utility convert -t 65 -i $png -o $cube
+      # lut_utility convert -t 33 -i $png -o $cube
     fi
     ######################################################################
     # PNG: HaldcLUT
@@ -136,13 +137,7 @@ do
           primaries=bt709:
           transfer=linear,
         format=gbrpf32le,
-        hwupload,
-        libplacebo=
-          lut=$cube:
-          lut_type=normalized:
-          format=gbrpf32le,
-        hwdownload,
-        format=gbrpf32le,
+        lut3d=file=$cube,
         zscale=
           primaries=bt709:
           transfer=bt709:
@@ -159,6 +154,28 @@ do
       -preset p5 -rc constqp -qp 18 \
       -an \
       _video.mp4
+
+      # -filter_complex "
+      #   zscale=
+      #     primaries=bt709:
+      #     transfer=linear,
+      #   format=gbrpf32le,
+      #   hwupload,
+      #   libplacebo=
+      #     lut=$cube:
+      #     lut_type=normalized:
+      #     format=gbrpf32le,
+      #   hwdownload,
+      #   format=gbrpf32le,
+      #   zscale=
+      #     primaries=bt709:
+      #     transfer=bt709:
+      #     matrix=bt709:
+      #     in_range=full:
+      #     out_range=tv,
+      #   format=yuv422p10le
+      # " \
+
   else
     ######################################################################
     # EXR: HaldcLUT
